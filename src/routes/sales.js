@@ -4,7 +4,7 @@ import Product from "../models/Product.js";
 import Customer from "../models/Customer.js";
 import StockLedger from "../models/StockLedger.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
-import { saleLineInternalQty, generateBillNo } from "../utils/saleHelpers.js";
+import { saleLineInternalQty, generateBillNo, billTaxBreakup } from "../utils/saleHelpers.js";
 import { streamBillPdf } from "../utils/billPdf.js";
 import { allocateFefo, reverseBreakdown, earliestActiveBatch, landLegacyReturn } from "../utils/batchHelpers.js";
 
@@ -38,11 +38,11 @@ router.get("/:id", async (req, res) => {
   const sale = await Sale.findById(req.params.id).populate("customer", "name phone").populate("createdBy", "username");
   if (!sale) return res.status(404).json({ message: "No records found." });
   if (!canAccessSale(sale, req.user)) return res.status(403).json({ message: "You do not have permission to perform this action." });
-  res.json(sale);
+  res.json({ ...sale.toObject(), taxBreakup: billTaxBreakup(sale) });
 });
 
 router.get("/:id/pdf", async (req, res) => {
-  const sale = await Sale.findById(req.params.id).populate("customer", "name phone");
+  const sale = await Sale.findById(req.params.id).populate("customer", "name phone").populate("createdBy", "username");
   if (!sale) return res.status(404).json({ message: "No records found." });
   if (!canAccessSale(sale, req.user)) return res.status(403).json({ message: "You do not have permission to perform this action." });
   streamBillPdf(sale, res);
@@ -92,6 +92,7 @@ router.post("/", async (req, res) => {
         line: {
           product: product._id,
           name: product.name,
+          hsnCode: product.hsnCode || "",
           unitType: item.unitType,
           unitLabel,
           qty,

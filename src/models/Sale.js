@@ -8,6 +8,7 @@ const saleItemSchema = new mongoose.Schema(
       required: true,
     },
     name: { type: String, required: true }, // snapshot, in case the product is later renamed/deactivated
+    hsnCode: { type: String, default: "" }, // snapshot, for the printed bill
     unitType: {
       type: String,
       enum: ["pack", "loose"],
@@ -29,6 +30,10 @@ const saleItemSchema = new mongoose.Schema(
         batch: { type: mongoose.Schema.Types.ObjectId, ref: "Batch", required: true },
         qty: { type: Number, required: true },
         costPricePerUnit: { type: Number, required: true },
+        // Snapshots for the printed bill, so a reprint never depends on the
+        // Batch record still existing/matching later - see billPdf.js.
+        batchNo: { type: String, default: "" },
+        expiryDate: { type: Date, default: null },
         _id: false,
       },
     ],

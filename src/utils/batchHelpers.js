@@ -57,7 +57,13 @@ export async function allocateFefo(product, neededQty) {
     const costPricePerUnit =
       product.soldAs === "pack-and-loose" ? batch.costPrice / product.unitsPerPack : batch.costPrice;
 
-    breakdown.push({ batch: batch._id, qty: take, costPricePerUnit: Number(costPricePerUnit.toFixed(4)) });
+    breakdown.push({
+      batch: batch._id,
+      qty: take,
+      costPricePerUnit: Number(costPricePerUnit.toFixed(4)),
+      batchNo: batch.batchNo,
+      expiryDate: batch.expiryDate,
+    });
     remaining -= take;
   }
 
