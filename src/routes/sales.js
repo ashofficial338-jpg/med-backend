@@ -9,6 +9,7 @@ import { saleLineInternalQty, generateBillNo, buildBillText } from "../utils/sal
 import { streamBillPdf } from "../utils/billPdf.js";
 import { allocateFefo, reverseBreakdown, earliestActiveBatch, landLegacyReturn } from "../utils/batchHelpers.js";
 import { generatePaymentNo } from "../utils/ledgerHelpers.js";
+import { streamExcelReport, streamPdfReport } from "../utils/reportExport.js";
 
 const router = Router();
 router.use(requireAuth);
@@ -34,6 +35,73 @@ router.get("/", async (req, res) => {
     .sort({ createdAt: -1 })
     .limit(200);
   res.json(sales);
+});
+
+// Registered before GET "/:id" - both are single-segment GET routes, and
+// Express matches in registration order, so this must come first or "/:id"
+// would treat "export" as a sale id.
+router.get("/export", async (req, res) => {
+  const { q, from, to, format } = req.query;
+  const filter = {};
+  if (req.user.role === "staff") filter.createdBy = req.user._id;
+  if (q) filter.billNo = new RegExp(q, "i");
+  if (from || to) {
+    filter.createdAt = {};
+    if (from) filter.createdAt.$gte = new Date(from);
+    if (to) filter.createdAt.$lte = new Date(to);
+  }
+
+  const sales = await Sale.find(filter).populate("customer", "name phone").populate("createdBy", "username").sort({ createdAt: -1 });
+  const rows = sales.map((s) => ({
+    billNo: s.billNo,
+    date: s.createdAt.toISOString().slice(0, 10),
+    customer: s.customer?.name || "Walk-in",
+    paymentMode: s.paymentMode,
+    subtotal: s.subtotal,
+    gst: s.gstAmount,
+    discount: s.discount,
+    total: s.total,
+    amountPaid: s.amountPaid ?? s.total,
+    balanceDue: s.balanceDue,
+    status: s.paymentStatus,
+  }));
+
+  if (format === "pdf") {
+    return streamPdfReport(res, "GHM_Sales_Report.pdf", {
+      title: "GHM Medical Shop - Sales Report",
+      subtitle: `${rows.length} bill(s)`,
+      columns: [
+        { header: "Bill No", key: "billNo" },
+        { header: "Date", key: "date" },
+        { header: "Customer", key: "customer" },
+        { header: "Mode", key: "paymentMode" },
+        { header: "Total", key: "total", align: "right" },
+        { header: "Balance Due", key: "balanceDue", align: "right" },
+        { header: "Status", key: "status" },
+      ],
+      rows,
+    });
+  }
+
+  return streamExcelReport(res, "GHM_Sales_Report.xlsx", [
+    {
+      name: "Sales",
+      columns: [
+        { header: "Bill No", key: "billNo", width: 16 },
+        { header: "Date", key: "date", width: 14 },
+        { header: "Customer", key: "customer", width: 20 },
+        { header: "Payment Mode", key: "paymentMode", width: 14 },
+        { header: "Subtotal", key: "subtotal", width: 12 },
+        { header: "GST", key: "gst", width: 12 },
+        { header: "Discount", key: "discount", width: 12 },
+        { header: "Total", key: "total", width: 12 },
+        { header: "Amount Paid", key: "amountPaid", width: 12 },
+        { header: "Balance Due", key: "balanceDue", width: 12 },
+        { header: "Status", key: "status", width: 12 },
+      ],
+      rows,
+    },
+  ]);
 });
 
 router.get("/:id", async (req, res) => {

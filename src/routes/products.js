@@ -9,6 +9,8 @@ import { uploadProductImage, uploadedImageUrl } from "../middleware/upload.js";
 import { generateProductCode, resolveCategory, computeLooseRate, deriveSoldAs } from "../utils/productHelpers.js";
 import { computeInternalQty as computeQty } from "../utils/stockUnits.js";
 import { upsertBatch } from "../utils/batchHelpers.js";
+import { buildStockReport } from "../utils/stockReportHelpers.js";
+import { streamExcelReport, streamPdfReport } from "../utils/reportExport.js";
 
 const router = Router();
 const importUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
@@ -94,6 +96,54 @@ router.get("/expiry-tracker", requireAuth, requireRole("admin"), async (req, res
   }
 
   res.json({ expired, expiringSoon, ok, windowDays: EXPIRING_SOON_WINDOW_DAYS });
+});
+
+// Registered before GET "/:id" for the same reason as "/expiry-tracker" above.
+router.get("/stock-report", requireAuth, requireRole("admin"), async (req, res) => {
+  const { category, availability, format } = req.query;
+  const { rows, totals } = await buildStockReport({ category, availability });
+
+  if (format === "pdf") {
+    return streamPdfReport(res, "GHM_Stock_Report.pdf", {
+      title: "GHM Medical Shop - Stock Report",
+      subtitle: `${totals.skuCount} SKUs · Value at cost: Rs. ${totals.totalValueCost.toFixed(2)} · Value at MRP: Rs. ${totals.totalValueMrp.toFixed(2)}`,
+      columns: [
+        { header: "Product", key: "name" },
+        { header: "Code", key: "productCode" },
+        { header: "Category", key: "category" },
+        { header: "Qty on Hand", key: "qtyDisplay" },
+        { header: "Value (Cost)", key: "valueCostDisplay", align: "right" },
+        { header: "Value (MRP)", key: "valueMrpDisplay", align: "right" },
+      ],
+      rows: rows.map((r) => ({
+        ...r,
+        valueCostDisplay: `Rs. ${r.valueCost.toFixed(2)}`,
+        valueMrpDisplay: `Rs. ${r.valueMrp.toFixed(2)}`,
+      })),
+    });
+  }
+
+  if (format === "excel") {
+    return streamExcelReport(res, "GHM_Stock_Report.xlsx", [
+      {
+        name: "Stock Report",
+        columns: [
+          { header: "Product", key: "name", width: 28 },
+          { header: "Code", key: "productCode", width: 14 },
+          { header: "Category", key: "category", width: 18 },
+          { header: "Qty on Hand", key: "qtyDisplay", width: 22 },
+          { header: "Low Stock", key: "isLowStock", width: 12 },
+          { header: "Out of Stock", key: "isOut", width: 12 },
+          { header: "Nearest Expiry", key: "nearestExpiry", width: 16 },
+          { header: "Value (Cost)", key: "valueCost", width: 14 },
+          { header: "Value (MRP)", key: "valueMrp", width: 14 },
+        ],
+        rows: rows.map((r) => ({ ...r, nearestExpiry: r.nearestExpiry ? r.nearestExpiry.toISOString().slice(0, 10) : "" })),
+      },
+    ]);
+  }
+
+  res.json({ rows, totals });
 });
 
 router.post("/stock-clearance", requireAuth, requireRole("admin"), async (req, res) => {

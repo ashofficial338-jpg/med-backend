@@ -3,6 +3,7 @@ import Customer from "../models/Customer.js";
 import Sale from "../models/Sale.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
 import { buildCustomerLedger, customerOutstandingMap, recordCustomerPayment } from "../utils/ledgerHelpers.js";
+import { streamExcelReport, streamPdfReport } from "../utils/reportExport.js";
 
 const router = Router();
 router.use(requireAuth);
@@ -64,6 +65,52 @@ router.get("/:id/ledger", requireRole("admin"), async (req, res) => {
 
   const ledger = await buildCustomerLedger(customer._id);
   res.json({ customer, ...ledger });
+});
+
+router.get("/:id/ledger/export", requireRole("admin"), async (req, res) => {
+  const customer = await Customer.findById(req.params.id);
+  if (!customer) return res.status(404).json({ message: "No records found." });
+
+  const { entries, outstandingBalance } = await buildCustomerLedger(customer._id);
+  const rows = entries.map((e) => ({
+    date: new Date(e.date).toISOString().slice(0, 10),
+    type: e.type,
+    ref: e.ref,
+    debit: e.debit || 0,
+    credit: e.credit || 0,
+    balance: e.balance,
+  }));
+
+  if (req.query.format === "pdf") {
+    return streamPdfReport(res, `GHM_Ledger_${customer.name}.pdf`, {
+      title: `${customer.name} - Customer Ledger`,
+      subtitle: `${customer.phone} · Outstanding: Rs. ${outstandingBalance.toFixed(2)}`,
+      columns: [
+        { header: "Date", key: "date" },
+        { header: "Type", key: "type" },
+        { header: "Ref", key: "ref" },
+        { header: "Debit", key: "debit", align: "right" },
+        { header: "Credit", key: "credit", align: "right" },
+        { header: "Balance", key: "balance", align: "right" },
+      ],
+      rows,
+    });
+  }
+
+  return streamExcelReport(res, `GHM_Ledger_${customer.name}.xlsx`, [
+    {
+      name: "Ledger",
+      columns: [
+        { header: "Date", key: "date", width: 14 },
+        { header: "Type", key: "type", width: 18 },
+        { header: "Ref", key: "ref", width: 16 },
+        { header: "Debit", key: "debit", width: 12 },
+        { header: "Credit", key: "credit", width: 12 },
+        { header: "Balance", key: "balance", width: 12 },
+      ],
+      rows,
+    },
+  ]);
 });
 
 router.post("/:id/payments", requireRole("admin"), async (req, res) => {

@@ -4,6 +4,7 @@ import Vendor from "../models/Vendor.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
 import { buildSupplierLedger, vendorOutstandingMap, recordSupplierPayment } from "../utils/ledgerHelpers.js";
 import { buildVendorReport } from "../utils/vendorReportHelpers.js";
+import { streamExcelReport, streamPdfReport } from "../utils/reportExport.js";
 
 const router = Router();
 router.use(requireAuth, requireRole("admin"));
@@ -32,6 +33,52 @@ router.get("/:id/ledger", async (req, res) => {
 
   const ledger = await buildSupplierLedger(vendor._id);
   res.json({ vendor, ...ledger });
+});
+
+router.get("/:id/ledger/export", async (req, res) => {
+  const vendor = await Vendor.findById(req.params.id);
+  if (!vendor) return res.status(404).json({ message: "No records found." });
+
+  const { entries, outstandingBalance } = await buildSupplierLedger(vendor._id);
+  const rows = entries.map((e) => ({
+    date: new Date(e.date).toISOString().slice(0, 10),
+    type: e.type,
+    ref: e.ref,
+    debit: e.debit || 0,
+    credit: e.credit || 0,
+    balance: e.balance,
+  }));
+
+  if (req.query.format === "pdf") {
+    return streamPdfReport(res, `GHM_Ledger_${vendor.name}.pdf`, {
+      title: `${vendor.name} - Vendor Ledger`,
+      subtitle: `${vendor.phone} · Outstanding Payable: Rs. ${outstandingBalance.toFixed(2)}`,
+      columns: [
+        { header: "Date", key: "date" },
+        { header: "Type", key: "type" },
+        { header: "Ref", key: "ref" },
+        { header: "Debit", key: "debit", align: "right" },
+        { header: "Credit", key: "credit", align: "right" },
+        { header: "Balance", key: "balance", align: "right" },
+      ],
+      rows,
+    });
+  }
+
+  return streamExcelReport(res, `GHM_Ledger_${vendor.name}.xlsx`, [
+    {
+      name: "Ledger",
+      columns: [
+        { header: "Date", key: "date", width: 14 },
+        { header: "Type", key: "type", width: 18 },
+        { header: "Ref", key: "ref", width: 16 },
+        { header: "Debit", key: "debit", width: 12 },
+        { header: "Credit", key: "credit", width: 12 },
+        { header: "Balance", key: "balance", width: 12 },
+      ],
+      rows,
+    },
+  ]);
 });
 
 router.post("/:id/payments", async (req, res) => {
@@ -64,6 +111,43 @@ router.get("/:id/report", async (req, res) => {
   const period = req.query.period === "quarter" ? "quarter" : "month";
   const report = await buildVendorReport(vendor._id, period);
   res.json({ vendor, period, report });
+});
+
+router.get("/:id/report/export", async (req, res) => {
+  const vendor = await Vendor.findById(req.params.id);
+  if (!vendor) return res.status(404).json({ message: "No records found." });
+
+  const period = req.query.period === "quarter" ? "quarter" : "month";
+  const report = await buildVendorReport(vendor._id, period);
+
+  if (req.query.format === "pdf") {
+    return streamPdfReport(res, `GHM_VendorReport_${vendor.name}.pdf`, {
+      title: `${vendor.name} - Purchase Report (${period}-wise)`,
+      subtitle: `${vendor.phone} · ${vendor.gstNumber}`,
+      columns: [
+        { header: "Period", key: "period" },
+        { header: "Invoices", key: "invoiceCount", align: "right" },
+        { header: "Purchases", key: "totalPurchases", align: "right" },
+        { header: "Paid", key: "totalPaid", align: "right" },
+        { header: "Outstanding", key: "outstanding", align: "right" },
+      ],
+      rows: report,
+    });
+  }
+
+  return streamExcelReport(res, `GHM_VendorReport_${vendor.name}.xlsx`, [
+    {
+      name: "Vendor Report",
+      columns: [
+        { header: "Period", key: "period", width: 14 },
+        { header: "Invoices", key: "invoiceCount", width: 12 },
+        { header: "Purchases", key: "totalPurchases", width: 14 },
+        { header: "Paid", key: "totalPaid", width: 14 },
+        { header: "Outstanding", key: "outstanding", width: 14 },
+      ],
+      rows: report,
+    },
+  ]);
 });
 
 router.patch("/:id/rating", async (req, res) => {

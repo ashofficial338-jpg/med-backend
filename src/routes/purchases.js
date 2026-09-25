@@ -8,6 +8,7 @@ import { requireAuth, requireRole } from "../middleware/auth.js";
 import { computeInternalQty } from "../utils/stockUnits.js";
 import { upsertBatch } from "../utils/batchHelpers.js";
 import { generatePaymentNo } from "../utils/ledgerHelpers.js";
+import { streamExcelReport, streamPdfReport } from "../utils/reportExport.js";
 
 const router = Router();
 router.use(requireAuth, requireRole("admin"));
@@ -26,6 +27,68 @@ router.get("/", async (req, res) => {
     .populate("items.product", "name productCode")
     .sort({ date: -1, createdAt: -1 });
   res.json(purchases);
+});
+
+// Registered before GET "/:id" - both are single-segment GET routes, and
+// Express matches in registration order, so this must come first or "/:id"
+// would treat "export" as a purchase id.
+router.get("/export", async (req, res) => {
+  const { vendor, from, to, format } = req.query;
+  const filter = {};
+  if (vendor) filter.vendor = vendor;
+  if (from || to) {
+    filter.date = {};
+    if (from) filter.date.$gte = new Date(from);
+    if (to) filter.date.$lte = new Date(to);
+  }
+  const purchases = await Purchase.find(filter).populate("vendor", "name").sort({ date: -1, createdAt: -1 });
+  const rows = purchases.map((p) => ({
+    invoiceNo: p.invoiceNo,
+    date: p.date.toISOString().slice(0, 10),
+    vendor: p.vendor?.name || "",
+    paymentMode: p.paymentMode,
+    subtotal: p.subtotal,
+    gst: p.gstAmount,
+    tds: p.tdsAmount,
+    total: p.total,
+    amountPaid: p.amountPaid ?? p.total,
+    balanceDue: p.balanceDue,
+  }));
+
+  if (format === "pdf") {
+    return streamPdfReport(res, "GHM_Purchases_Report.pdf", {
+      title: "GHM Medical Shop - Purchases Report",
+      subtitle: `${rows.length} invoice(s)`,
+      columns: [
+        { header: "Invoice No", key: "invoiceNo" },
+        { header: "Date", key: "date" },
+        { header: "Vendor", key: "vendor" },
+        { header: "Mode", key: "paymentMode" },
+        { header: "Total", key: "total", align: "right" },
+        { header: "Balance Due", key: "balanceDue", align: "right" },
+      ],
+      rows,
+    });
+  }
+
+  return streamExcelReport(res, "GHM_Purchases_Report.xlsx", [
+    {
+      name: "Purchases",
+      columns: [
+        { header: "Invoice No", key: "invoiceNo", width: 16 },
+        { header: "Date", key: "date", width: 14 },
+        { header: "Vendor", key: "vendor", width: 20 },
+        { header: "Payment Mode", key: "paymentMode", width: 14 },
+        { header: "Subtotal", key: "subtotal", width: 12 },
+        { header: "GST", key: "gst", width: 12 },
+        { header: "TDS", key: "tds", width: 12 },
+        { header: "Total", key: "total", width: 12 },
+        { header: "Amount Paid", key: "amountPaid", width: 12 },
+        { header: "Balance Due", key: "balanceDue", width: 12 },
+      ],
+      rows,
+    },
+  ]);
 });
 
 router.get("/:id", async (req, res) => {

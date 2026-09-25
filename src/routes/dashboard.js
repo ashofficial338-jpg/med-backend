@@ -1,5 +1,4 @@
 import { Router } from "express";
-import ExcelJS from "exceljs";
 import Sale from "../models/Sale.js";
 import Purchase from "../models/Purchase.js";
 import Expense from "../models/Expense.js";
@@ -8,6 +7,9 @@ import Product from "../models/Product.js";
 import Batch from "../models/Batch.js";
 import Category from "../models/Category.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
+import { streamExcelReport, streamPdfReport } from "../utils/reportExport.js";
+import { buildStockReport } from "../utils/stockReportHelpers.js";
+import { vendorOutstandingMap } from "../utils/ledgerHelpers.js";
 
 const router = Router();
 router.use(requireAuth, requireRole("admin"));
@@ -109,6 +111,12 @@ async function computeSummary(start, end) {
     .limit(20)
     .then((batches) => batches.filter((b) => b.product).slice(0, 5));
 
+  // Stock value and payables are current-state figures (not bound to the
+  // selected date range) - a snapshot of "right now", same as the Day Book.
+  const { totals: stockTotals } = await buildStockReport();
+  const outstandingMap = await vendorOutstandingMap();
+  const totalPayables = [...outstandingMap.values()].reduce((sum, v) => sum + v, 0);
+
   return {
     revenue: Number(revenue.toFixed(2)),
     cogs: Number(cogs.toFixed(2)),
@@ -119,6 +127,8 @@ async function computeSummary(start, end) {
     inputGst: Number(inputGst.toFixed(2)),
     netGst: Number((outputGst - inputGst).toFixed(2)),
     totalPurchases: Number(totalPurchases.toFixed(2)),
+    totalStockValue: stockTotals.totalValueCost,
+    totalPayables: Number(totalPayables.toFixed(2)),
     salesCount: sales.length,
     fastMovers,
     lowStock,
@@ -137,16 +147,7 @@ router.get("/summary", async (req, res) => {
 router.get("/export", async (req, res) => {
   const { start, end } = resolveRange(req);
   const summary = await computeSummary(start, end);
-
-  const sales = await Sale.find({ createdAt: { $gte: start, $lte: end } }).populate("customer", "name phone");
-  const purchases = await Purchase.find({ date: { $gte: start, $lte: end } }).populate("vendor", "name");
-  const expenses = await Expense.find({ date: { $gte: start, $lte: end } });
-
-  const workbook = new ExcelJS.Workbook();
-
-  const summarySheet = workbook.addWorksheet("Summary");
-  summarySheet.columns = [{ header: "Metric", key: "k", width: 30 }, { header: "Value", key: "v", width: 20 }];
-  summarySheet.addRows([
+  const summaryRows = [
     { k: "Period", v: `${start.toDateString()} - ${end.toDateString()}` },
     { k: "Revenue", v: summary.revenue },
     { k: "Cost of Goods Sold", v: summary.cogs },
@@ -156,69 +157,88 @@ router.get("/export", async (req, res) => {
     { k: "Output GST", v: summary.outputGst },
     { k: "Input GST", v: summary.inputGst },
     { k: "Net GST Payable", v: summary.netGst },
+    { k: "Total Purchases", v: summary.totalPurchases },
+    { k: "Total Stock Value (cost)", v: summary.totalStockValue },
+    { k: "Total Payables", v: summary.totalPayables },
+  ];
+
+  if (req.query.format === "pdf") {
+    return streamPdfReport(res, "GHM_Report.pdf", {
+      title: "GHM Medical Shop - P&L Summary",
+      subtitle: `${start.toDateString()} - ${end.toDateString()}`,
+      columns: [
+        { header: "Metric", key: "k" },
+        { header: "Value", key: "v", align: "right" },
+      ],
+      rows: summaryRows.map((r) => ({ k: r.k, v: typeof r.v === "number" ? `Rs. ${r.v.toFixed(2)}` : r.v })),
+    });
+  }
+
+  const sales = await Sale.find({ createdAt: { $gte: start, $lte: end } }).populate("customer", "name phone");
+  const purchases = await Purchase.find({ date: { $gte: start, $lte: end } }).populate("vendor", "name");
+  const expenses = await Expense.find({ date: { $gte: start, $lte: end } });
+
+  await streamExcelReport(res, "GHM_Report.xlsx", [
+    {
+      name: "Summary",
+      columns: [{ header: "Metric", key: "k", width: 30 }, { header: "Value", key: "v", width: 20 }],
+      rows: summaryRows,
+    },
+    {
+      name: "Sales",
+      columns: [
+        { header: "Bill No", key: "billNo", width: 16 },
+        { header: "Date", key: "date", width: 20 },
+        { header: "Customer", key: "customer", width: 20 },
+        { header: "Subtotal", key: "subtotal", width: 12 },
+        { header: "GST", key: "gst", width: 12 },
+        { header: "Discount", key: "discount", width: 12 },
+        { header: "Total", key: "total", width: 12 },
+        { header: "Status", key: "status", width: 12 },
+      ],
+      rows: sales.map((s) => ({
+        billNo: s.billNo,
+        date: s.createdAt.toISOString().slice(0, 10),
+        customer: s.customer?.name || "Walk-in",
+        subtotal: s.subtotal,
+        gst: s.gstAmount,
+        discount: s.discount,
+        total: s.total,
+        status: s.paymentStatus,
+      })),
+    },
+    {
+      name: "Purchases",
+      columns: [
+        { header: "Invoice No", key: "invoiceNo", width: 16 },
+        { header: "Date", key: "date", width: 20 },
+        { header: "Vendor", key: "vendor", width: 20 },
+        { header: "Subtotal", key: "subtotal", width: 12 },
+        { header: "GST", key: "gst", width: 12 },
+        { header: "TDS", key: "tds", width: 12 },
+        { header: "Total", key: "total", width: 12 },
+      ],
+      rows: purchases.map((p) => ({
+        invoiceNo: p.invoiceNo,
+        date: p.date.toISOString().slice(0, 10),
+        vendor: p.vendor?.name,
+        subtotal: p.subtotal,
+        gst: p.gstAmount,
+        tds: p.tdsAmount,
+        total: p.total,
+      })),
+    },
+    {
+      name: "Expenses",
+      columns: [
+        { header: "Date", key: "date", width: 20 },
+        { header: "Category", key: "category", width: 16 },
+        { header: "Amount", key: "amount", width: 12 },
+        { header: "Notes", key: "notes", width: 30 },
+      ],
+      rows: expenses.map((e) => ({ date: e.date.toISOString().slice(0, 10), category: e.category, amount: e.amount, notes: e.notes })),
+    },
   ]);
-
-  const salesSheet = workbook.addWorksheet("Sales");
-  salesSheet.columns = [
-    { header: "Bill No", key: "billNo", width: 16 },
-    { header: "Date", key: "date", width: 20 },
-    { header: "Customer", key: "customer", width: 20 },
-    { header: "Subtotal", key: "subtotal", width: 12 },
-    { header: "GST", key: "gst", width: 12 },
-    { header: "Discount", key: "discount", width: 12 },
-    { header: "Total", key: "total", width: 12 },
-    { header: "Status", key: "status", width: 12 },
-  ];
-  sales.forEach((s) =>
-    salesSheet.addRow({
-      billNo: s.billNo,
-      date: s.createdAt.toISOString().slice(0, 10),
-      customer: s.customer?.name || "Walk-in",
-      subtotal: s.subtotal,
-      gst: s.gstAmount,
-      discount: s.discount,
-      total: s.total,
-      status: s.paymentStatus,
-    })
-  );
-
-  const purchasesSheet = workbook.addWorksheet("Purchases");
-  purchasesSheet.columns = [
-    { header: "Invoice No", key: "invoiceNo", width: 16 },
-    { header: "Date", key: "date", width: 20 },
-    { header: "Vendor", key: "vendor", width: 20 },
-    { header: "Subtotal", key: "subtotal", width: 12 },
-    { header: "GST", key: "gst", width: 12 },
-    { header: "TDS", key: "tds", width: 12 },
-    { header: "Total", key: "total", width: 12 },
-  ];
-  purchases.forEach((p) =>
-    purchasesSheet.addRow({
-      invoiceNo: p.invoiceNo,
-      date: p.date.toISOString().slice(0, 10),
-      vendor: p.vendor?.name,
-      subtotal: p.subtotal,
-      gst: p.gstAmount,
-      tds: p.tdsAmount,
-      total: p.total,
-    })
-  );
-
-  const expensesSheet = workbook.addWorksheet("Expenses");
-  expensesSheet.columns = [
-    { header: "Date", key: "date", width: 20 },
-    { header: "Category", key: "category", width: 16 },
-    { header: "Amount", key: "amount", width: 12 },
-    { header: "Notes", key: "notes", width: 30 },
-  ];
-  expenses.forEach((e) =>
-    expensesSheet.addRow({ date: e.date.toISOString().slice(0, 10), category: e.category, amount: e.amount, notes: e.notes })
-  );
-
-  res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
-  res.setHeader("Content-Disposition", "attachment; filename=GHM_Report.xlsx");
-  await workbook.xlsx.write(res);
-  res.end();
 });
 
 export default router;
