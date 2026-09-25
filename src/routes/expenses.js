@@ -18,7 +18,7 @@ router.get("/", async (req, res) => {
 });
 
 router.post("/", async (req, res) => {
-  const { category, amount, date, notes } = req.body;
+  const { category, amount, date, notes, paymentMode } = req.body;
   if (!["Rent", "Salary", "Utilities", "Other"].includes(category)) {
     return res.status(400).json({ message: "This field is required." });
   }
@@ -28,6 +28,7 @@ router.post("/", async (req, res) => {
   const expense = await Expense.create({
     category,
     amount: Number(amount),
+    paymentMode: ["Cash", "UPI", "Card", "Other"].includes(paymentMode) ? paymentMode : "Cash",
     date,
     notes: notes || "",
     createdBy: req.user._id,

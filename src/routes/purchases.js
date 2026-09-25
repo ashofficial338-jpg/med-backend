@@ -3,9 +3,11 @@ import Purchase from "../models/Purchase.js";
 import Vendor from "../models/Vendor.js";
 import Product from "../models/Product.js";
 import StockLedger from "../models/StockLedger.js";
+import SupplierPayment from "../models/SupplierPayment.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
 import { computeInternalQty } from "../utils/stockUnits.js";
 import { upsertBatch } from "../utils/batchHelpers.js";
+import { generatePaymentNo } from "../utils/ledgerHelpers.js";
 
 const router = Router();
 router.use(requireAuth, requireRole("admin"));
@@ -35,7 +37,7 @@ router.get("/:id", async (req, res) => {
 });
 
 router.post("/", async (req, res) => {
-  const { vendor, invoiceNo, date, items, tdsAmount } = req.body;
+  const { vendor, invoiceNo, date, items, tdsAmount, paymentMode, amountPaid } = req.body;
 
   if (!vendor) return res.status(400).json({ message: "This field is required." });
   if (!invoiceNo || !invoiceNo.trim()) return res.status(400).json({ message: "This field is required." });
@@ -87,6 +89,12 @@ router.post("/", async (req, res) => {
     gstAmount = Number(gstAmount.toFixed(2));
     const total = Number((subtotal + gstAmount).toFixed(2));
 
+    // A non-Credit purchase is settled in full immediately; Credit is the
+    // only mode that can carry a payable balance forward.
+    const resolvedPaymentMode = paymentMode || "Credit";
+    const resolvedAmountPaid =
+      resolvedPaymentMode === "Credit" ? Math.min(Math.max(Number(amountPaid) || 0, 0), total) : total;
+
     const purchase = await Purchase.create({
       vendor,
       invoiceNo: invoiceNo.trim(),
@@ -96,8 +104,22 @@ router.post("/", async (req, res) => {
       gstAmount,
       tdsAmount: Number(tdsAmount) || 0,
       total,
+      paymentMode: resolvedPaymentMode,
+      amountPaid: resolvedAmountPaid,
       createdBy: req.user._id,
     });
+
+    if (resolvedPaymentMode === "Credit" && resolvedAmountPaid > 0) {
+      const paymentNo = await generatePaymentNo("supplier");
+      await SupplierPayment.create({
+        paymentNo,
+        vendor,
+        purchase: purchase._id,
+        amount: resolvedAmountPaid,
+        note: "Paid at purchase",
+        recordedBy: req.user._id,
+      });
+    }
 
     // Stock-in: each line creates (or tops up, if this exact batch number
     // already exists for the product) its own Batch row, so an older lot's

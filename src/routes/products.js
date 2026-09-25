@@ -269,6 +269,51 @@ router.patch("/:id", requireAuth, requireRole("admin"), (req, res) => {
   });
 });
 
+// One-time, one-way conversion of an existing pack-only product to also sell
+// loose - not a generic field edit, because Product.qty and every Batch's
+// qtyReceived/qtyRemaining are stored in whatever unit the product's current
+// soldAs implies (whole packs for pack-only). Switching to pack-and-loose
+// means the internal unit becomes loose units instead, so everything already
+// on hand is rescaled by the same unitsPerPack factor to keep representing
+// the same physical stock - see the PATCH "/:id" comment above for why this
+// can't just be another editable field.
+router.patch("/:id/enable-loose", requireAuth, requireRole("admin"), async (req, res) => {
+  const product = await Product.findById(req.params.id);
+  if (!product) return res.status(404).json({ message: "No records found." });
+  if (product.soldAs === "pack-and-loose") {
+    return res.status(400).json({ message: "This product already sells loose." });
+  }
+
+  const unitsPerPack = Number(req.body.unitsPerPack);
+  const looseUnitName = req.body.looseUnitName;
+  if (!(unitsPerPack > 1)) return res.status(400).json({ message: "Please enter a valid number." });
+  if (!LOOSE_UNITS.includes(looseUnitName)) return res.status(400).json({ message: "This field is required." });
+
+  try {
+    const batches = await Batch.find({ product: product._id });
+    for (const batch of batches) {
+      batch.qtyReceived *= unitsPerPack;
+      batch.qtyRemaining *= unitsPerPack;
+      await batch.save();
+    }
+
+    product.qty *= unitsPerPack;
+    product.unitsPerPack = unitsPerPack;
+    product.looseUnitName = looseUnitName;
+    product.soldAs = "pack-and-loose";
+    product.looseRate = computeLooseRate({ soldAs: "pack-and-loose", packRate: product.packRate, unitsPerPack });
+    await product.save();
+
+    const populated = await product.populate(["category", "vendor"].map((path) => ({ path, select: "name" })));
+    res.json(stripCostPriceIfStaff(populated, "admin"));
+  } catch (e) {
+    if (e.name === "ValidationError") {
+      return res.status(400).json({ message: Object.values(e.errors)[0].message });
+    }
+    res.status(500).json({ message: "Something went wrong. Please try again." });
+  }
+});
+
 router.delete("/:id", requireAuth, requireRole("admin"), async (req, res) => {
   const product = await Product.findById(req.params.id);
   if (!product) return res.status(404).json({ message: "No records found." });

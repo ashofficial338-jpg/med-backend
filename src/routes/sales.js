@@ -3,10 +3,12 @@ import Sale from "../models/Sale.js";
 import Product from "../models/Product.js";
 import Customer from "../models/Customer.js";
 import StockLedger from "../models/StockLedger.js";
+import CustomerPayment from "../models/CustomerPayment.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
 import { saleLineInternalQty, generateBillNo, buildBillText } from "../utils/saleHelpers.js";
 import { streamBillPdf } from "../utils/billPdf.js";
 import { allocateFefo, reverseBreakdown, earliestActiveBatch, landLegacyReturn } from "../utils/batchHelpers.js";
+import { generatePaymentNo } from "../utils/ledgerHelpers.js";
 
 const router = Router();
 router.use(requireAuth);
@@ -49,10 +51,19 @@ router.get("/:id/pdf", async (req, res) => {
 });
 
 router.post("/", async (req, res) => {
-  const { customer, items, paymentMode, discount, overrideExpiredReason } = req.body;
+  const { customer, items, paymentMode, discount, overrideExpiredReason, amountReceived } = req.body;
 
   if (!Array.isArray(items) || items.length === 0) {
     return res.status(400).json({ message: "Add at least one product to the cart before completing payment." });
+  }
+  let customerId = null;
+  if (customer) {
+    const customerDoc = typeof customer === "string" ? await Customer.findById(customer).catch(() => null) : null;
+    if (!customerDoc) return res.status(400).json({ message: "No records found." });
+    customerId = customerDoc._id;
+  }
+  if (paymentMode === "Credit" && !customerId) {
+    return res.status(400).json({ message: "A customer must be selected for a credit sale." });
   }
 
   const isAdmin = req.user.role === "admin";
@@ -151,11 +162,9 @@ router.post("/", async (req, res) => {
     const gstAmount = Number(resolved.reduce((s, r) => s + r.line.gstAmount, 0).toFixed(2));
     const total = Number((subtotal + gstAmount - appliedDiscount).toFixed(2));
 
-    let customerId = null;
-    if (customer) {
-      const customerDoc = typeof customer === "string" ? await Customer.findById(customer) : null;
-      customerId = customerDoc ? customerDoc._id : null;
-    }
+    const resolvedPaymentMode = paymentMode || "Cash";
+    const amountPaid =
+      resolvedPaymentMode === "Credit" ? Math.min(Math.max(Number(amountReceived) || 0, 0), total) : total;
 
     const billNo = await generateBillNo();
     const sale = await Sale.create({
@@ -166,9 +175,22 @@ router.post("/", async (req, res) => {
       gstAmount,
       discount: appliedDiscount,
       total,
-      paymentMode: paymentMode || "Cash",
+      paymentMode: resolvedPaymentMode,
+      amountPaid,
       createdBy: req.user._id,
     });
+
+    if (resolvedPaymentMode === "Credit" && amountPaid > 0) {
+      const paymentNo = await generatePaymentNo("customer");
+      await CustomerPayment.create({
+        paymentNo,
+        customer: customerId,
+        sale: sale._id,
+        amount: amountPaid,
+        note: "Received at billing",
+        recordedBy: req.user._id,
+      });
+    }
 
     for (const { line } of resolved) {
       for (const b of line.batchBreakdown) {
@@ -238,6 +260,10 @@ router.post("/:id/void", requireRole("admin"), async (req, res) => {
   sale.voidReason = reason.trim();
   sale.voidedBy = req.user._id;
   sale.voidedAt = new Date();
+  // A voided bill is dropped from the receivables ledger entirely (see
+  // ledgerHelpers.js's paymentStatus filter) - clear its balance too so it
+  // never shows outstanding money owed on a sale that no longer stands.
+  sale.amountPaid = sale.total;
   await sale.save();
 
   res.json({ ...sale.toObject(), billText: buildBillText(sale) });

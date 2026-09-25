@@ -68,9 +68,12 @@ const saleSchema = new mongoose.Schema(
     },
     paymentMode: {
       type: String,
-      enum: ["Cash", "Card", "UPI", "Other"],
+      enum: ["Cash", "Card", "UPI", "Other", "Credit"],
       default: "Cash",
     },
+    // Only ever mutated by creating a CustomerPayment (see ledgerHelpers.js) -
+    // never edited directly, so the sum of payments always matches this field.
+    amountPaid: { type: Number, required: true, default: 0 },
     voidReason: { type: String, default: "" },
     voidedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
     voidedAt: { type: Date, default: null },
@@ -80,7 +83,14 @@ const saleSchema = new mongoose.Schema(
       required: true,
     },
   },
-  { timestamps: true }
+  { timestamps: true, toJSON: { virtuals: true }, toObject: { virtuals: true } }
 );
+
+// Sales recorded before this field existed have no amountPaid - treat them as
+// fully paid rather than manufacturing historical receivables out of nowhere.
+saleSchema.virtual("balanceDue").get(function () {
+  const paid = this.amountPaid ?? this.total;
+  return Number((this.total - paid).toFixed(2));
+});
 
 export default mongoose.model("Sale", saleSchema);

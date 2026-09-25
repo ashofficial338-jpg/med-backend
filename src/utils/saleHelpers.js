@@ -129,16 +129,14 @@ function twoCol(left, right, split = 50) {
 }
 
 const TABLE_COLS = [
-  ["Qty", 6, "L"],
-  ["Particulars", 21, "L"],
-  ["HSN", 9, "L"],
-  ["Mfr", 5, "L"],
-  ["Batch", 8, "L"],
-  ["Loc", 4, "L"],
-  ["Exp", 6, "L"],
+  ["Qty", 9, "L"],
+  ["Particulars", 29, "L"],
+  ["MFR", 6, "L"],
   ["MRP", 8, "R"],
+  ["Batch", 10, "L"],
   ["Rate", 8, "R"],
-  ["GST", 5, "R"],
+  ["LOC", 5, "L"],
+  ["EXP", 7, "L"],
   ["Amount", 10, "R"],
 ];
 
@@ -204,11 +202,9 @@ export function buildBillText(sale) {
   if (contactBits.length) lines.push(centered(contactBits.join("    ")));
   lines.push(HEAVY);
 
-  const billType = sale.paymentStatus === "void" ? "Void Bill" : "No Tax Bill";
   lines.push(twoCol(field("Bill No", 10, sale.billNo), field("Date", 12, formatDateOnly(sale.createdAt))));
   lines.push(twoCol(field("Name", 10, sale.customer?.name || "Walk-in"), field("Time", 12, formatTimeOnly(sale.createdAt))));
-  lines.push(twoCol(field("Dr.", 10, ""), field("Bill Type", 12, billType)));
-  lines.push(twoCol(field("Cus Phone", 10, sale.customer?.phone || ""), field("Payment Mode", 12, sale.paymentMode)));
+  lines.push(twoCol(field("Dr.", 10, ""), field("Cus Phone", 12, sale.customer?.phone || "")));
   lines.push(LIGHT);
 
   lines.push(tableRow(TABLE_COLS.map((c) => c[0])));
@@ -218,45 +214,41 @@ export function buildBillText(sale) {
       tableRow([
         `${item.qty} ${item.unitLabel}`,
         item.name,
-        item.hsnCode || "",
         "",
+        item.rate.toFixed(2),
         itemBatchLabel(item),
+        item.rate.toFixed(2),
         "",
         itemExpiryLabel(item),
-        item.rate.toFixed(2),
-        item.rate.toFixed(2),
-        `${item.gstPercent}%`,
         (item.amount + item.gstAmount).toFixed(2),
       ])
     );
+    lines.push(`           HSN Code: ${padEndTo(item.hsnCode || "-", 12)}GST: ${item.gstPercent}%`);
+    lines.push("");
   }
   lines.push(LIGHT);
 
-  const SPLIT = 46;
-  const summary = [
-    "GST SUMMARY",
-    `${padEndTo("Rate", 6)}${padStartTo("Taxable", 11)}${padStartTo("CGST", 10)}${padStartTo("SGST", 10)}`,
-    `${"-".repeat(6)}${"-".repeat(11)}${"-".repeat(10)}${"-".repeat(10)}`,
-    ...breakup.byRate.map(
-      (r) =>
-        `${padEndTo(`${r.rate}%`, 6)}${padStartTo(r.taxable.toFixed(2), 11)}${padStartTo(r.cgst.toFixed(2), 10)}${padStartTo(r.sgst.toFixed(2), 10)}`
-    ),
-    "-".repeat(37),
-    `${padEndTo("Total", 6)}${padStartTo(breakup.base.toFixed(2), 11)}${padStartTo(breakup.cgst.toFixed(2), 10)}${padStartTo(breakup.sgst.toFixed(2), 10)}`,
-    "",
-  ];
-  const totals = [
-    `Gross Total: ${breakup.grossTotal.toFixed(2)}`,
-    sale.discount > 0 ? `Discount ${breakup.discountPercent.toFixed(2)}%: ${sale.discount.toFixed(2)}` : "",
-    `Taxable Value: ${breakup.base.toFixed(2)}`,
-    `CGST: ${breakup.cgst.toFixed(2)}`,
-    `SGST: ${breakup.sgst.toFixed(2)}`,
-    `Round Off: ${breakup.roundOffDelta >= 0 ? "" : "-"}${Math.abs(breakup.roundOffDelta).toFixed(2)}`,
-    "",
-    `NET PAYABLE: ${breakup.roundedOff.toFixed(2)}`,
-  ];
-  for (let i = 0; i < summary.length; i++) {
-    lines.push(twoCol(summary[i], totals[i] || "", SPLIT));
+  lines.push(padStartTo(`Gross Total: ${breakup.grossTotal.toFixed(2)}`, W));
+  if (sale.discount > 0) {
+    lines.push(padStartTo(`Discount ${breakup.discountPercent.toFixed(2)}%: ${sale.discount.toFixed(2)}`, W));
+  }
+  lines.push(padStartTo(`Taxable Value: ${breakup.base.toFixed(2)}`, W));
+  // One CGST/SGST line per GST rate present in the sale - almost always a
+  // single pair (e.g. "CGST 2.5%"), but a cart mixing GST rates (5%/12%/...)
+  // gets one pair per rate so the printed tax split stays exact.
+  for (const r of breakup.byRate) {
+    lines.push(padStartTo(`CGST ${(r.rate / 2).toFixed(2)}%: ${r.cgst.toFixed(2)}`, W));
+    lines.push(padStartTo(`SGST ${(r.rate / 2).toFixed(2)}%: ${r.sgst.toFixed(2)}`, W));
+  }
+  lines.push(padStartTo(`Round Off: ${breakup.roundOffDelta >= 0 ? "" : "-"}${Math.abs(breakup.roundOffDelta).toFixed(2)}`, W));
+  lines.push(LIGHT);
+  lines.push(padStartTo(`NET PAYABLE: ${breakup.roundedOff.toFixed(2)}`, W));
+
+  const amountPaid = sale.amountPaid ?? sale.total;
+  const due = Number((sale.total - amountPaid).toFixed(2));
+  if (sale.paymentMode === "Credit" && due > 0) {
+    lines.push(padStartTo(`Amount Received: ${amountPaid.toFixed(2)}`, W));
+    lines.push(padStartTo(`Balance Due: ${due.toFixed(2)}`, W));
   }
   lines.push(HEAVY);
 
@@ -267,6 +259,8 @@ export function buildBillText(sale) {
   lines.push(
     `${padEndTo("Billed By: " + (sale.createdBy?.username || ""), 24)}${padEndTo("SMAN:", 24)}${padEndTo(`Items: ${sale.items.length}`, 16)}Total Qty: ${totalQty}`
   );
+  lines.push("");
+  lines.push("Signature:");
   lines.push(LIGHT);
 
   if (sale.paymentStatus === "void") {
