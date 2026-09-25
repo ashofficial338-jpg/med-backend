@@ -23,13 +23,18 @@ import daybookRoutes from "./routes/daybook.js";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 
-// CORS_ORIGIN is a comma-separated allowlist for a separately-hosted frontend
-// (e.g. "https://med-shop-web.onrender.com"). Left unset, every origin is
-// allowed, which covers same-origin/combined deploys and local dev.
-const allowedOrigins = process.env.CORS_ORIGIN?.split(",").map((o) => o.trim()).filter(Boolean);
+// Frontends allowed to call this API: the Vite dev server and the Vercel
+// deploy, plus any extra origins from CORS_ORIGIN (comma-separated, e.g. a
+// custom domain). Registered before every route so all responses get the
+// CORS headers.
+const allowedOrigins = [
+  "http://localhost:5173",
+  "https://your-app.vercel.app",
+  ...(process.env.CORS_ORIGIN?.split(",").map((o) => o.trim()).filter(Boolean) ?? []),
+];
 app.use(
   cors({
-    origin: allowedOrigins?.length ? allowedOrigins : true,
+    origin: allowedOrigins,
     credentials: true,
   })
 );
