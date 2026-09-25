@@ -4,7 +4,7 @@ import Product from "../models/Product.js";
 import Customer from "../models/Customer.js";
 import StockLedger from "../models/StockLedger.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
-import { saleLineInternalQty, generateBillNo, billTaxBreakup } from "../utils/saleHelpers.js";
+import { saleLineInternalQty, generateBillNo, buildBillText } from "../utils/saleHelpers.js";
 import { streamBillPdf } from "../utils/billPdf.js";
 import { allocateFefo, reverseBreakdown, earliestActiveBatch, landLegacyReturn } from "../utils/batchHelpers.js";
 
@@ -38,7 +38,7 @@ router.get("/:id", async (req, res) => {
   const sale = await Sale.findById(req.params.id).populate("customer", "name phone").populate("createdBy", "username");
   if (!sale) return res.status(404).json({ message: "No records found." });
   if (!canAccessSale(sale, req.user)) return res.status(403).json({ message: "You do not have permission to perform this action." });
-  res.json({ ...sale.toObject(), taxBreakup: billTaxBreakup(sale) });
+  res.json({ ...sale.toObject(), billText: buildBillText(sale) });
 });
 
 router.get("/:id/pdf", async (req, res) => {
@@ -196,7 +196,7 @@ router.post("/:id/void", requireRole("admin"), async (req, res) => {
   const { reason } = req.body;
   if (!reason || !reason.trim()) return res.status(400).json({ message: "This field is required." });
 
-  const sale = await Sale.findById(req.params.id);
+  const sale = await Sale.findById(req.params.id).populate("customer", "name phone").populate("createdBy", "username");
   if (!sale) return res.status(404).json({ message: "No records found." });
   if (sale.paymentStatus === "void") {
     return res.status(400).json({ message: "This bill has already been voided." });
@@ -240,7 +240,7 @@ router.post("/:id/void", requireRole("admin"), async (req, res) => {
   sale.voidedAt = new Date();
   await sale.save();
 
-  res.json(sale);
+  res.json({ ...sale.toObject(), billText: buildBillText(sale) });
 });
 
 export default router;
