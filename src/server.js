@@ -3,6 +3,10 @@ import path from "node:path";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import express from "express";
+// Express 4 doesn't catch errors thrown in async route handlers - they become
+// unhandled rejections that crash the whole process. This routes them to the
+// error handler below instead, so one bad request returns a 500, not a 502.
+import "express-async-errors";
 import cors from "cors";
 import morgan from "morgan";
 import { connectDB } from "./config/db.js";
@@ -82,6 +86,14 @@ app.use((err, req, res, next) => {
 });
 
 const PORT = process.env.PORT || 5000;
+
+// Fail at startup (visible in the host's deploy logs) rather than on the
+// first login, when a missing secret would otherwise surface as a 500.
+const missingEnv = ["MONGO_URI", "JWT_SECRET"].filter((key) => !process.env[key]);
+if (missingEnv.length) {
+  console.error(`Missing required environment variables: ${missingEnv.join(", ")}`);
+  process.exit(1);
+}
 
 connectDB()
   .then(() => {
